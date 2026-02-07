@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 
 logger = logging.getLogger('discord')
 
-MUSIC_DIRECTORY = "/home/mpron/discord/DJ_Poodle/audio"
+MUSIC_DIRECTORY = "[YOUR PATH HERE]"
 ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
 
 # UPDATED IMPORT: Added get_stream_url
