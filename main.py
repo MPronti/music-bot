@@ -15,10 +15,11 @@ BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 
 logger = logging.getLogger('discord')
 
-MUSIC_DIRECTORY = "[YOUR PATH HERE]"
+MUSIC_DIRECTORY = "/home/mpron/discord/DJ_Poodle/audio"
 ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
 
-from youtube import create_youtube_audio_source, get_youtube_info
+# UPDATED IMPORT: Added get_stream_url
+from youtube import create_youtube_audio_source, get_youtube_info, get_stream_url
 
 def create_normalized_audio_source(file_path: str) -> discord.FFmpegPCMAudio:
     """Create a normalized audio source using FFmpeg filters."""
@@ -80,7 +81,7 @@ async def commands_slash(interaction: discord.Interaction):
         "!dj_resume:       Resume paused song\n"
         "!dj_skip:         Skip current song\n"
         "!dj_list:         List all available music\n"
-        "!dj_stop:         Stop music and disconnect\n"
+        "!dj_stop:         Stop music playback and disconnect\n"
         "\nYouTube Commands:\n"
         "!yt_play [url]:   Play a YouTube video or playlist\n"
         "!yt_pause:        Pause current video\n"
@@ -326,8 +327,18 @@ async def play_next_youtube(ctx, vc):
     guild_state.yt_now_playing = current_song
 
     try:
-        stream_url = current_song.get('url')
-        if not stream_url: raise ValueError("Missing stream URL!")
+        # CRITICAL FIX: Just-In-Time URL resolution.
+        # We don't rely on the stored URL being the audio stream; we assume it's the webpage URL
+        # and resolve the actual stream URL right here to prevent expiration and allow fast queuing.
+        video_webpage_url = current_song.get('url')
+        if not video_webpage_url: raise ValueError("Missing video URL!")
+
+        # Run blocking extraction in executor
+        loop = asyncio.get_event_loop()
+        stream_url = await loop.run_in_executor(None, get_stream_url, video_webpage_url)
+        
+        if not stream_url:
+            raise ValueError("Could not extract stream URL")
 
         audio_source = create_youtube_audio_source(stream_url)
         vc.play(
@@ -370,7 +381,7 @@ async def yt_play(ctx, *, url: str):
                 if v and v.get('url'):
                     guild_state.yt_queue.append({
                         'title': v.get('title', 'Unknown'),
-                        'url': v.get('url'),
+                        'url': v.get('url'), # This is now the webpage URL (due to extract_flat)
                         'duration': v.get('duration')
                     })
                     items_added += 1
@@ -440,4 +451,5 @@ async def yt_resume(ctx):
         ctx.voice_client.resume()
         await ctx.send("YouTube resumed")
 
+# Run the bot
 bot.run(BOT_TOKEN)
