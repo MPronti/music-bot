@@ -10,6 +10,7 @@ python-dotenv
 yt-dlp
 PyNaCl
 ffmpeg
+davey (for discord.py 2.7.x and up)
 ```
 
 ## Setup
@@ -22,7 +23,7 @@ DISCORD_TOKEN=[your_discord_bot_token]
 
 | Command | Description |
 | :--- | :--- |
-| `!dj_play [song]` | Play specified song (name or path) |
+| `!dj_play [song]` | Play a specified local song (name or path) |
 | `!dj_play` | Shuffle play all local songs |
 | `!dj_pause` | Pause current song |
 | `!dj_resume` | Resume paused song |
@@ -34,10 +35,13 @@ DISCORD_TOKEN=[your_discord_bot_token]
 
 | Command | Description |
 | :--- | :--- |
-| `!yt_play [url]` | Play a YouTube video or playlist |
+| `!yt_play [song]` | Play a specified YouTube video or playlist (name or URL) |
 | `!yt_pause` | Pause current video |
 | `!yt_resume` | Resume paused video |
 | `!yt_skip` | Skip current video |
 | `!yt_queue` | Show the YouTube queue |
 | `!yt_clear` | Clear the YouTube queue |
 | `!yt_stop` | Stop YouTube playback and disconnect |
+
+#### Notes
+!yt_play: If a name is specified, the video which appears first in a YouTube search of that name will be played
