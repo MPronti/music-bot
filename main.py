@@ -28,6 +28,7 @@ def create_normalized_audio_source(file_path: str) -> discord.FFmpegPCMAudio:
     }
     return discord.FFmpegPCMAudio(file_path, **options)
 
+MAX_QUEUE_SIZE = 100
 # ---------------------------------------------
 # STATE MANAGEMENT
 # ---------------------------------------------
@@ -200,7 +201,7 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
     display_name = None
 
     if filename:
-        matches = await find_song_paths(filename, MUSIC_DIRECTORY)
+        matches = await find_song_paths_async(filename, MUSIC_DIRECTORY)
         if not matches:
             return await ctx.send(f"Could not find **'{filename}'**!")
         elif len(matches) > 1:
@@ -223,7 +224,7 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
         await ctx.send(f"Queued up: **{display_name}**")
     else:
         # Shuffle
-        audio_files = await get_all_songs(MUSIC_DIRECTORY)
+        audio_files = await get_all_songs_async(MUSIC_DIRECTORY)
         if not audio_files:
             return await ctx.send(f"No audio files found in {MUSIC_DIRECTORY}!")
         random.shuffle(audio_files)
@@ -401,6 +402,10 @@ async def yt_play(ctx, *, url: str):
 
             items_added = 0
             for v in video_list:
+                if len(guild_state.yt_queue) >= MAX_QUEUE_SIZE:
+                    await ctx.send(f"Queue capacity of {MAX_QUEUE_SIZE} reached. Some videos were omitted.")
+                    break
+                
                 if v and v.get('url'):
                     guild_state.yt_queue.append({
                         'title': v.get('title', 'Unknown'),
