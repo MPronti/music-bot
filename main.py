@@ -75,7 +75,7 @@ async def on_ready():
 async def commands_slash(interaction: discord.Interaction):
     response = (
         "```DJ Commands:\n"
-        "!dj_play [song]:  Play specified song (name or path)\n"
+        "!dj_play [song]:  Play a specified local song (name or path)\n"
         "!dj_play:         Shuffle play all local songs\n"
         "!dj_pause:        Pause current song\n"
         "!dj_resume:       Resume paused song\n"
@@ -83,7 +83,7 @@ async def commands_slash(interaction: discord.Interaction):
         "!dj_list:         List all available music\n"
         "!dj_stop:         Stop music playback and disconnect\n"
         "\nYouTube Commands:\n"
-        "!yt_play [url]:   Play a YouTube video or playlist\n"
+        "!yt_play [song]:  Play a specified YouTube video or playlist (name or URL)\n"
         "!yt_pause:        Pause current video\n"
         "!yt_resume:       Resume paused video\n"
         "!yt_skip:         Skip current video\n"
@@ -119,6 +119,18 @@ def get_all_songs(search_path):
                 all_songs.append(os.path.join(root, file))
     return all_songs
 
+async def find_song_paths_async(target_name: str, search_path: str) -> List[str]:
+    """Asynchronously searches for allowed audio files."""
+    def _search():
+        return find_song_paths(target_name, search_path)
+    return await asyncio.to_thread(_search)
+
+async def get_all_songs_async(search_path: str) -> List[str]:
+    """Asynchronously gets all valid audio files."""
+    def _get_all():
+        return get_all_songs(search_path)
+    return await asyncio.to_thread(_get_all)
+
 async def get_or_move_voice_client(ctx, voice_channel):
     if ctx.voice_client is None:
         return await voice_channel.connect()
@@ -133,7 +145,7 @@ async def after_dj_playback(ctx, vc, error):
     guild_state = get_guild_state(ctx.guild.id)
     if error:
         logger.error(f"Error in DJ playback: {error}")
-        await ctx.send(f"An error occurred: {error}!")
+        await ctx.send("An error occurred during playback.")
 
     # Check for switching flag to prevent premature disconnect
     if guild_state.is_switching_sources:
@@ -171,7 +183,8 @@ async def play_next_dj_song(ctx, vc):
         await ctx.send(f"Now playing: **{display_name}**")
         
     except Exception as e:
-        await ctx.send(f"Error playing file: {e}!")
+        logger.error(f"Error playing file: {e}", exc_info=True)
+        await ctx.send("Failed to play the local file.")
         await after_dj_playback(ctx, vc, e)
 
 @bot.command()
@@ -187,7 +200,7 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
     display_name = None
 
     if filename:
-        matches = find_song_paths(filename, MUSIC_DIRECTORY)
+        matches = await find_song_paths(filename, MUSIC_DIRECTORY)
         if not matches:
             return await ctx.send(f"Could not find **'{filename}'**!")
         elif len(matches) > 1:
@@ -210,7 +223,7 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
         await ctx.send(f"Queued up: **{display_name}**")
     else:
         # Shuffle
-        audio_files = get_all_songs(MUSIC_DIRECTORY)
+        audio_files = await get_all_songs(MUSIC_DIRECTORY)
         if not audio_files:
             return await ctx.send(f"No audio files found in {MUSIC_DIRECTORY}!")
         random.shuffle(audio_files)
@@ -229,27 +242,33 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
     if guild_state.dj_queue:
         await play_next_dj_song(ctx, vc)
 
+async def generate_dj_list(search_path: str) -> List[str]:
+    def _generate():
+        lines = []
+        for root, dirs, files in os.walk(search_path):
+            level = root.replace(search_path, '').count(os.sep)
+            indent = ' ' * 4 * level
+            folder_name = os.path.basename(root)
+            lines.append(f"{folder_name}/" if level == 0 else f"{indent}{folder_name}/")
+            
+            sub_indent = ' ' * 4 * (level + 1)
+            for f in files:
+                _, ext = os.path.splitext(f)
+                if ext.lower() in ALLOWED_EXTENSIONS:
+                    lines.append(f"{sub_indent}- {f}")
+        return lines
+    return await asyncio.to_thread(_generate)
+
 @bot.command()
-async def dj_list(ctx):
+async def dj_list(ctx: commands.Context):
     if not os.path.exists(MUSIC_DIRECTORY):
         return await ctx.send(f"Error: Directory `{MUSIC_DIRECTORY}` does not exist!")
 
     await ctx.send(f"**Listing files in:** `{MUSIC_DIRECTORY}`")
-    lines = []
-    for root, dirs, files in os.walk(MUSIC_DIRECTORY):
-        level = root.replace(MUSIC_DIRECTORY, '').count(os.sep)
-        indent = ' ' * 4 * level
-        folder_name = os.path.basename(root)
-        if level == 0: lines.append(f"{folder_name}/")
-        else: lines.append(f"{indent}{folder_name}/")
-        
-        sub_indent = ' ' * 4 * (level + 1)
-        for f in files:
-            _, ext = os.path.splitext(f)
-            if ext.lower() in ALLOWED_EXTENSIONS:
-                lines.append(f"{sub_indent}- {f}")
+    lines = await generate_dj_list(MUSIC_DIRECTORY)
 
-    if not lines: return await ctx.send("Directory is empty!")
+    if not lines or len(lines) == 1: 
+        return await ctx.send("Directory is empty or contains no valid audio files!")
 
     messages = []
     chunk = "```text\n"
@@ -262,7 +281,8 @@ async def dj_list(ctx):
     chunk += "```"
     messages.append(chunk)
 
-    for msg in messages: await ctx.send(msg)
+    for msg in messages: 
+        await ctx.send(msg)
 
 @bot.command()
 async def dj_skip(ctx):
@@ -306,7 +326,7 @@ async def after_youtube_playback(ctx, vc, error):
     guild_state.yt_now_playing = None 
     if error:
         logger.error(f"Error during YouTube playback: {error}")
-        await ctx.send(f"An error occurred: {error}!")
+        await ctx.send("An error occurred during playback.")
 
     if guild_state.is_switching_sources:
         return
@@ -374,6 +394,9 @@ async def yt_play(ctx, *, url: str):
             video_list = await loop.run_in_executor(None, get_youtube_info, url)
             
             if not video_list:
+                guild_state.is_switching_sources = False
+                if vc.is_connected() and not vc.is_playing() and not vc.is_paused():
+                    await vc.disconnect()
                 return await msg.edit(content="Failed to get video information!")
 
             items_added = 0
@@ -399,11 +422,13 @@ async def yt_play(ctx, *, url: str):
                 await play_next_youtube(ctx, vc)
 
         except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
-            await msg.edit(content=f"Error: {e}!")
+            logger.error(f"Error during extraction: {e}", exc_info=True)
+            await msg.edit(content="An error occurred while processing the request.")
             guild_state.is_switching_sources = False
+            if vc.is_connected() and not vc.is_playing() and not vc.is_paused():
+                await vc.disconnect()
 
-    bot.loop.create_task(process_and_play())
+    asyncio.create_task(process_and_play())
 
 @bot.command()
 async def yt_skip(ctx):
