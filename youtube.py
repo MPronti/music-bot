@@ -14,12 +14,12 @@ YOUTUBE_URL_REGEX = re.compile(
 
 # --- yt-dlp Configuration ---
 YDL_OPTS = {
-    'format': 'bestaudio/best',     # Select best quality audio available
+    'format': 'bestaudio/best',
     'quiet': True,
     'noplaylist': False,
-    'extract_flat': 'in_playlist',  # Fast extraction for playlists
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
+    'extract_flat': 'in_playlist',  
+    'default_search': 'ytsearch1',  # Limits plain-text searches to 1 result
+    'source_address': '0.0.0.0',    # Good practice: prevents IPv6 blocking issues
 }
 
 # --- FFmpeg Configuration ---
@@ -38,37 +38,52 @@ def is_youtube_url(url: str) -> bool:
 def get_youtube_info(url: str) -> Optional[List[Dict]]:
     """
     Retrieves video metadata using 'flat' extraction for playlists.
-    Returns dictionaries containing title and valid webpage URL.
+    Returns dictionaries containing title, valid webpage URL, and duration.
     """
     with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
         try:
-            logger.info(f"Extracting info for URL: {url}")
+            logger.info(f"Extracting info for input: {url}")
             info = ydl.extract_info(url, download=False)
             
             if not info:
                 logger.warning(f"yt-dlp returned no info for {url}")
                 return None
 
+            entries = []
+
             if 'entries' in info:
-                # Playlist: entries are flat (partial info)
-                entries = []
+                # Playlist or Search Results
                 for entry in info['entries']:
-                    if entry:
-                        video_url = entry.get('url')
-                        # Ensure we have a valid URL 
-                        if video_url and not video_url.startswith('http'):
-                            video_url = f"https://www.youtube.com/watch?v={video_url}"
+                    if not entry:
+                        continue
                         
-                        entries.append({
-                            'title': entry.get('title', 'Unknown'),
-                            'url': video_url,
-                            'duration': entry.get('duration')
-                        })
-                logger.info(f"Successfully extracted {len(entries)} videos from playlist.")
-                return entries
+                    # Rely on 'url' first, fallback to 'id' construction
+                    video_url = entry.get('url')
+                    if not video_url or not video_url.startswith('http'):
+                        video_id = entry.get('id')
+                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+                    entries.append({
+                        'title': entry.get('title', 'Unknown'),
+                        'url': video_url,
+                        'duration': entry.get('duration')
+                    })
+                logger.info(f"Successfully extracted {len(entries)} videos.")
             else:
                 # Single video
-                return [info]
+                # Use 'webpage_url' to avoid storing expiring CDN stream links
+                video_url = info.get('webpage_url', info.get('url'))
+                if not video_url or not video_url.startswith('http'):
+                    video_url = f"https://www.youtube.com/watch?v={info.get('id')}"
+
+                entries.append({
+                    'title': info.get('title', 'Unknown'),
+                    'url': video_url,
+                    'duration': info.get('duration')
+                })
+                logger.info("Successfully extracted 1 video.")
+
+            return entries
             
         except Exception as e:
             logger.error(f"Error in get_youtube_info: {e}", exc_info=True)
@@ -84,6 +99,8 @@ def get_stream_url(video_url: str) -> Optional[str]:
     with yt_dlp.YoutubeDL(stream_opts) as ydl:
         try:
             info = ydl.extract_info(video_url, download=False)
+            if not info:
+                return None
             return info.get('url') 
         except Exception as e:
             logger.error(f"Error resolving stream URL for {video_url}: {e}")
