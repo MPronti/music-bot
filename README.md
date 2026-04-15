@@ -14,10 +14,9 @@ davey (for discord.py 2.7.x and up)
 ```
 
 ## Setup
-Create a `.env` file in your directory with:
-```
-DISCORD_TOKEN=[your_discord_bot_token]
-```
+Create a `.env` file in your directory with `DISCORD_TOKEN=[your_discord_bot_token]`
+
+Be sure to update your local audio path in `main.py`
 
 ### DJ Commands (Local)
 
