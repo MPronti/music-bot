@@ -45,4 +45,5 @@ DISCORD_TOKEN=[your_discord_bot_token]
 
 #### Notes
 !dj_play: If no song name is specified, the entirety of the audio source directory will be shuffle played. If a subdirectory is specified, that directory will be shuffle played.
+
 !yt_play: If a name is specified, the video which appears first in a YouTube search of that name will be played
