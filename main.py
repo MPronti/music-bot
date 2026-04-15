@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 
 logger = logging.getLogger('discord')
 
-MUSIC_DIRECTORY = "/home/mpron/discord/DJ_Poodle/audio"
+MUSIC_DIRECTORY = "[your audio path here]"
 ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
 
 from youtube import create_youtube_audio_source, get_youtube_info, get_stream_url
