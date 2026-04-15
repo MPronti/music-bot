@@ -15,35 +15,34 @@ BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 
 logger = logging.getLogger('discord')
 
-MUSIC_DIRECTORY = "[YOUR PATH HERE]"
+MUSIC_DIRECTORY = "/home/mpron/discord/DJ_Poodle/audio"
 ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
 
-# UPDATED IMPORT: Added get_stream_url
 from youtube import create_youtube_audio_source, get_youtube_info, get_stream_url
 
+# Prevent premature task termination by the Python garbage collector
+background_tasks = set()
+
 def create_normalized_audio_source(file_path: str) -> discord.FFmpegPCMAudio:
-    """Create a normalized audio source using FFmpeg filters."""
     options = {
         'options': '-af "dynaudnorm=f=200:g=15:p=0.95"'
     }
     return discord.FFmpegPCMAudio(file_path, **options)
 
 MAX_QUEUE_SIZE = 100
+
 # ---------------------------------------------
 # STATE MANAGEMENT
 # ---------------------------------------------
 class GuildState:
     def __init__(self):
-        # DJ (local file) player state
         self.is_playing_dj = False
         self.is_paused_dj = False
         self.dj_queue: List[str] = []
         
-        # YouTube player state
         self.yt_queue: List[Dict] = []
         self.yt_now_playing: Optional[Dict] = None 
         
-        # Flag to prevent disconnects when switching between DJ and YT
         self.is_switching_sources = False
 
 guild_states: Dict[int, GuildState] = {}
@@ -58,6 +57,7 @@ def get_guild_state(guild_id: int) -> GuildState:
 # ---------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -72,11 +72,33 @@ async def on_ready():
     except Exception as e:
         logger.error("Error syncing commands:", exc_info=e)
 
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    if before.channel is not None and (after.channel is None or before.channel != after.channel):
+        vc = discord.utils.get(bot.voice_clients, guild=member.guild)
+        
+        if vc and vc.channel == before.channel:
+            non_bot_members = [m for m in vc.channel.members if not m.bot]
+            if len(non_bot_members) == 0:
+                guild_state = get_guild_state(member.guild.id)
+                guild_state.yt_queue.clear()
+                guild_state.dj_queue.clear()
+                guild_state.yt_now_playing = None
+                guild_state.is_playing_dj = False
+                guild_state.is_paused_dj = False # Added missing reset
+                guild_state.is_switching_sources = False
+                
+                await vc.disconnect()
+                logger.info(f"Disconnected from {before.channel.name} due to inactivity.")
+
 @bot.tree.command(name="commands", description="Display bot commands")
 async def commands_slash(interaction: discord.Interaction):
     response = (
         "```DJ Commands:\n"
-        "!dj_play [song]:  Play a specified local song (name or path)\n"
+        "!dj_play [song]:  Play a specified local song (name or subdirectory path)\n"
         "!dj_play:         Shuffle play all local songs\n"
         "!dj_pause:        Pause current song\n"
         "!dj_resume:       Resume paused song\n"
@@ -98,7 +120,6 @@ async def commands_slash(interaction: discord.Interaction):
 # HELPER FUNCTIONS
 # ---------------------------------------------
 def find_song_paths(target_name, search_path):
-    """Recursively searches for allowed audio files matching 'target_name'."""
     matches = []
     target_lower = target_name.lower()
     for root, dirs, files in os.walk(search_path):
@@ -111,7 +132,6 @@ def find_song_paths(target_name, search_path):
     return matches
 
 def get_all_songs(search_path):
-    """Recursively gets all valid audio files."""
     all_songs = []
     for root, dirs, files in os.walk(search_path):
         for file in files:
@@ -121,13 +141,11 @@ def get_all_songs(search_path):
     return all_songs
 
 async def find_song_paths_async(target_name: str, search_path: str) -> List[str]:
-    """Asynchronously searches for allowed audio files."""
     def _search():
         return find_song_paths(target_name, search_path)
     return await asyncio.to_thread(_search)
 
 async def get_all_songs_async(search_path: str) -> List[str]:
-    """Asynchronously gets all valid audio files."""
     def _get_all():
         return get_all_songs(search_path)
     return await asyncio.to_thread(_get_all)
@@ -148,8 +166,7 @@ async def after_dj_playback(ctx, vc, error):
         logger.error(f"Error in DJ playback: {error}")
         await ctx.send("An error occurred during playback.")
 
-    # Check for switching flag to prevent premature disconnect
-    if guild_state.is_switching_sources:
+    if not vc.is_connected() or guild_state.is_switching_sources:
         return
 
     if guild_state.dj_queue:
@@ -157,10 +174,11 @@ async def after_dj_playback(ctx, vc, error):
     else:
         guild_state.is_playing_dj = False
         await ctx.send("DJ queue finished")
-        if vc.is_connected():
-            await vc.disconnect()
 
 async def play_next_dj_song(ctx, vc):
+    if not vc.is_connected() or vc.is_playing() or vc.is_paused():
+        return
+
     guild_state = get_guild_state(ctx.guild.id)
     if not guild_state.dj_queue:
         return await after_dj_playback(ctx, vc, None)
@@ -199,31 +217,46 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
 
     found_path = None
     display_name = None
+    is_directory_play = False
+    directory_files = []
 
     if filename:
-        matches = await find_song_paths_async(filename, MUSIC_DIRECTORY)
-        if not matches:
-            return await ctx.send(f"Could not find **'{filename}'**!")
-        elif len(matches) > 1:
-            msg = f"Found **{len(matches)}** songs named '{filename}':\n```"
-            for match in matches:
-                msg += f"- {os.path.relpath(match, MUSIC_DIRECTORY)}\n"
-            msg += "```\nPlease use a specific path"
-            return await ctx.send(msg)
-        else:
-            found_path = matches[0]
-            display_name = os.path.basename(found_path)
+        base_dir = os.path.abspath(MUSIC_DIRECTORY)
+        target_dir = os.path.abspath(os.path.join(base_dir, filename))
 
-    # Prepare transition
+        # Replaced vulnerable string matching with strict os.path.commonpath
+        if os.path.commonpath([base_dir, target_dir]) == base_dir and os.path.isdir(target_dir):
+            directory_files = await get_all_songs_async(target_dir)
+            if not directory_files:
+                return await ctx.send(f"No audio files found in directory **'{filename}'**!")
+            
+            random.shuffle(directory_files)
+            is_directory_play = True
+        else:
+            matches = await find_song_paths_async(filename, MUSIC_DIRECTORY)
+            if not matches:
+                return await ctx.send(f"Could not find song or directory **'{filename}'**!")
+            elif len(matches) > 1:
+                msg = f"Found **{len(matches)}** songs named '{filename}':\n```"
+                for match in matches:
+                    msg += f"- {os.path.relpath(match, MUSIC_DIRECTORY)}\n"
+                msg += "```\nPlease use a specific path"
+                return await ctx.send(msg)
+            else:
+                found_path = matches[0]
+                display_name = os.path.basename(found_path)
+
     guild_state.yt_queue.clear()
     guild_state.yt_now_playing = None
     guild_state.dj_queue.clear()
 
-    if found_path:
+    if is_directory_play:
+        guild_state.dj_queue.extend(directory_files)
+        await ctx.send(f"Queued {len(directory_files)} songs from directory **'{filename}'** (Shuffled)")
+    elif found_path:
         guild_state.dj_queue.append(found_path)
         await ctx.send(f"Queued up: **{display_name}**")
     else:
-        # Shuffle
         audio_files = await get_all_songs_async(MUSIC_DIRECTORY)
         if not audio_files:
             return await ctx.send(f"No audio files found in {MUSIC_DIRECTORY}!")
@@ -231,12 +264,9 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
         guild_state.dj_queue.extend(audio_files)
         await ctx.send(f"Queued {len(audio_files)} songs from the playlist")
 
-    # Trigger playback
     if vc.is_playing() or vc.is_paused():
-        # Set switching flag so the 'after' callback doesn't disconnect or play wrong thing
         guild_state.is_switching_sources = True 
         vc.stop()
-        # Allow a brief moment for cleanup/callback
         await asyncio.sleep(0.1)
         guild_state.is_switching_sources = False
         
@@ -329,17 +359,18 @@ async def after_youtube_playback(ctx, vc, error):
         logger.error(f"Error during YouTube playback: {error}")
         await ctx.send("An error occurred during playback.")
 
-    if guild_state.is_switching_sources:
+    if not vc.is_connected() or guild_state.is_switching_sources:
         return
 
     if guild_state.yt_queue:
         await play_next_youtube(ctx, vc)
     else:
-        await ctx.send("YouTube queue finished")
-        if vc.is_connected():
-            await vc.disconnect()
+        await ctx.send("YouTube queue finished.")
 
 async def play_next_youtube(ctx, vc):
+    if not vc.is_connected() or vc.is_playing() or vc.is_paused():
+        return
+
     guild_state = get_guild_state(ctx.guild.id)
     if not guild_state.yt_queue:
         return await after_youtube_playback(ctx, vc, None)
@@ -348,13 +379,9 @@ async def play_next_youtube(ctx, vc):
     guild_state.yt_now_playing = current_song
 
     try:
-        # CRITICAL FIX: Just-In-Time URL resolution.
-        # We don't rely on the stored URL being the audio stream; we assume it's the webpage URL
-        # and resolve the actual stream URL right here to prevent expiration and allow fast queuing.
         video_webpage_url = current_song.get('url')
         if not video_webpage_url: raise ValueError("Missing video URL!")
 
-        # Run blocking extraction in executor
         loop = asyncio.get_event_loop()
         stream_url = await loop.run_in_executor(None, get_stream_url, video_webpage_url)
         
@@ -380,7 +407,6 @@ async def yt_play(ctx, *, url: str):
     guild_state = get_guild_state(ctx.guild.id)
     vc = await get_or_move_voice_client(ctx, ctx.author.voice.channel)
 
-    # Prepare transition: Prevent disconnects if DJ is running
     if guild_state.is_playing_dj or guild_state.is_paused_dj or guild_state.dj_queue:
         guild_state.is_switching_sources = True
         guild_state.dj_queue.clear()
@@ -389,15 +415,13 @@ async def yt_play(ctx, *, url: str):
         await ctx.send("Switching to YouTube")
 
     async def process_and_play():
-        msg = await ctx.send(f"Processing request")
+        msg = await ctx.send("Processing request")
         try:
             loop = asyncio.get_event_loop()
             video_list = await loop.run_in_executor(None, get_youtube_info, url)
             
             if not video_list:
                 guild_state.is_switching_sources = False
-                if vc.is_connected() and not vc.is_playing() and not vc.is_paused():
-                    await vc.disconnect()
                 return await msg.edit(content="Failed to get video information!")
 
             items_added = 0
@@ -409,18 +433,18 @@ async def yt_play(ctx, *, url: str):
                 if v and v.get('url'):
                     guild_state.yt_queue.append({
                         'title': v.get('title', 'Unknown'),
-                        'url': v.get('url'), # This is now the webpage URL (due to extract_flat)
+                        'url': v.get('url'), 
                         'duration': v.get('duration')
                     })
                     items_added += 1
 
             if items_added == 0:
+                guild_state.is_switching_sources = False # Added missing reset to prevent queue deadlock
                 return await msg.edit(content="No playable videos found!")
             
             txt = f"Added **{video_list[0]['title']}**" if items_added == 1 else f"Added **{items_added}** videos"
             await msg.edit(content=txt)
 
-            # Reset flag now that queue is ready
             guild_state.is_switching_sources = False
 
             if not vc.is_playing() and not vc.is_paused():
@@ -430,10 +454,10 @@ async def yt_play(ctx, *, url: str):
             logger.error(f"Error during extraction: {e}", exc_info=True)
             await msg.edit(content="An error occurred while processing the request.")
             guild_state.is_switching_sources = False
-            if vc.is_connected() and not vc.is_playing() and not vc.is_paused():
-                await vc.disconnect()
 
-    asyncio.create_task(process_and_play())
+    task = asyncio.create_task(process_and_play())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 @bot.command()
 async def yt_skip(ctx):
@@ -481,5 +505,5 @@ async def yt_resume(ctx):
         ctx.voice_client.resume()
         await ctx.send("YouTube resumed")
 
-# Run the bot
-bot.run(BOT_TOKEN)
+if __name__ == "__main__":
+    bot.run(BOT_TOKEN)
