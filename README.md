@@ -14,9 +14,16 @@ davey (for discord.py 2.7.x and up)
 ```
 
 ## Setup
+Ensure you have a valid Python version and all listed dependencies installed with correct pathing
+
 Create a `.env` file in your directory with `DISCORD_TOKEN=[your_discord_bot_token]`
 
 Be sure to update your local audio path in `main.py`
+
+### Bot Commands
+| Command | Description |
+| :--- | :--- |
+| `/commands` | Lists all '!' commands |
 
 ### DJ Commands (Local)
 
