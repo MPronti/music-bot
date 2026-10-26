@@ -6,6 +6,7 @@ from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from youtube import create_youtube_audio_source, get_youtube_info, get_stream_url
 
 # ---------------------------------------------
 # SETUP & CONFIG
@@ -15,10 +16,9 @@ BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 
 logger = logging.getLogger('discord')
 
-MUSIC_DIRECTORY = "[your audio path here]"
-ALLOWED_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
-
-from youtube import create_youtube_audio_source, get_youtube_info, get_stream_url
+MUSIC_DIRECTORY = [your path string here]
+# Changed to a tuple to allow for faster string.endswith() checking
+ALLOWED_EXTENSIONS = ('.mp3', '.wav', '.flac', '.ogg', '.m4a')
 
 # Prevent premature task termination by the Python garbage collector
 background_tasks = set()
@@ -39,10 +39,10 @@ class GuildState:
         self.is_playing_dj = False
         self.is_paused_dj = False
         self.dj_queue: List[str] = []
-        
+
         self.yt_queue: List[Dict] = []
-        self.yt_now_playing: Optional[Dict] = None 
-        
+        self.yt_now_playing: Optional[Dict] = None
+
         self.is_switching_sources = False
 
 guild_states: Dict[int, GuildState] = {}
@@ -57,7 +57,7 @@ def get_guild_state(guild_id: int) -> GuildState:
 # ---------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.voice_states = True 
+intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -79,18 +79,18 @@ async def on_voice_state_update(member, before, after):
 
     if before.channel is not None and (after.channel is None or before.channel != after.channel):
         vc = discord.utils.get(bot.voice_clients, guild=member.guild)
-        
+
         if vc and vc.channel == before.channel:
-            non_bot_members = [m for m in vc.channel.members if not m.bot]
-            if len(non_bot_members) == 0:
+            # Optimized generator expression for finding active members
+            if not any(not m.bot for m in vc.channel.members):
                 guild_state = get_guild_state(member.guild.id)
                 guild_state.yt_queue.clear()
                 guild_state.dj_queue.clear()
                 guild_state.yt_now_playing = None
                 guild_state.is_playing_dj = False
-                guild_state.is_paused_dj = False # Added missing reset
+                guild_state.is_paused_dj = False
                 guild_state.is_switching_sources = False
-                
+
                 await vc.disconnect()
                 logger.info(f"Disconnected from {before.channel.name} due to inactivity.")
 
@@ -124,8 +124,8 @@ def find_song_paths(target_name, search_path):
     target_lower = target_name.lower()
     for root, dirs, files in os.walk(search_path):
         for file in files:
-            _, ext = os.path.splitext(file)
-            if ext.lower() in ALLOWED_EXTENSIONS:
+            # Optimized extension checking
+            if file.lower().endswith(ALLOWED_EXTENSIONS):
                 fname_no_ext = os.path.splitext(file)[0]
                 if fname_no_ext.lower() == target_lower:
                     matches.append(os.path.join(root, file))
@@ -135,8 +135,8 @@ def get_all_songs(search_path):
     all_songs = []
     for root, dirs, files in os.walk(search_path):
         for file in files:
-            _, ext = os.path.splitext(file)
-            if ext.lower() in ALLOWED_EXTENSIONS:
+            # Optimized extension checking
+            if file.lower().endswith(ALLOWED_EXTENSIONS):
                 all_songs.append(os.path.join(root, file))
     return all_songs
 
@@ -184,7 +184,7 @@ async def play_next_dj_song(ctx, vc):
         return await after_dj_playback(ctx, vc, None)
 
     file_path = guild_state.dj_queue.pop(0)
-    
+
     if not os.path.exists(file_path):
         await ctx.send(f"File not found: {file_path}, skipping!")
         return await after_dj_playback(ctx, vc, None)
@@ -192,7 +192,7 @@ async def play_next_dj_song(ctx, vc):
     try:
         audio_source = create_normalized_audio_source(file_path)
         display_name = os.path.basename(file_path)
-        
+
         vc.play(
             audio_source,
             after=lambda e: asyncio.run_coroutine_threadsafe(after_dj_playback(ctx, vc, e), bot.loop)
@@ -200,7 +200,7 @@ async def play_next_dj_song(ctx, vc):
         guild_state.is_playing_dj = True
         guild_state.is_paused_dj = False
         await ctx.send(f"Now playing: **{display_name}**")
-        
+
     except Exception as e:
         logger.error(f"Error playing file: {e}", exc_info=True)
         await ctx.send("Failed to play the local file.")
@@ -215,6 +215,17 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
     voice_channel = ctx.author.voice.channel
     vc = await get_or_move_voice_client(ctx, voice_channel)
 
+    # 1. Source Switching (Mimicking yt_play's switch logic)
+    if guild_state.yt_now_playing or guild_state.yt_queue:
+        guild_state.is_switching_sources = True
+        guild_state.yt_queue.clear()
+        guild_state.yt_now_playing = None
+        vc.stop()
+        await asyncio.sleep(0.1)  # Prevents overlapping callbacks
+        guild_state.is_switching_sources = False
+        await ctx.send("Switching to Local Audio")
+
+    # 2. File resolution
     found_path = None
     display_name = None
     is_directory_play = False
@@ -224,12 +235,10 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
         base_dir = os.path.abspath(MUSIC_DIRECTORY)
         target_dir = os.path.abspath(os.path.join(base_dir, filename))
 
-        # Replaced vulnerable string matching with strict os.path.commonpath
         if os.path.commonpath([base_dir, target_dir]) == base_dir and os.path.isdir(target_dir):
             directory_files = await get_all_songs_async(target_dir)
             if not directory_files:
                 return await ctx.send(f"No audio files found in directory **'{filename}'**!")
-            
             random.shuffle(directory_files)
             is_directory_play = True
         else:
@@ -246,13 +255,19 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
                 found_path = matches[0]
                 display_name = os.path.basename(found_path)
 
-    guild_state.yt_queue.clear()
-    guild_state.yt_now_playing = None
-    guild_state.dj_queue.clear()
+    # 3. Add to existing Queue (Respecting MAX_QUEUE_SIZE)
+    current_qsize = len(guild_state.dj_queue)
+    available_slots = MAX_QUEUE_SIZE - current_qsize
+
+    if available_slots <= 0:
+        return await ctx.send(f"Queue capacity of {MAX_QUEUE_SIZE} reached. Cannot add more songs.")
 
     if is_directory_play:
-        guild_state.dj_queue.extend(directory_files)
-        await ctx.send(f"Queued {len(directory_files)} songs from directory **'{filename}'** (Shuffled)")
+        to_add = directory_files[:available_slots]
+        guild_state.dj_queue.extend(to_add)
+        await ctx.send(f"Queued {len(to_add)} songs from directory **'{filename}'** (Shuffled)")
+        if len(directory_files) > available_slots:
+            await ctx.send(f"Omitted {len(directory_files) - available_slots} songs due to queue limits.")
     elif found_path:
         guild_state.dj_queue.append(found_path)
         await ctx.send(f"Queued up: **{display_name}**")
@@ -261,16 +276,14 @@ async def dj_play(ctx, *, filename: Optional[str] = None):
         if not audio_files:
             return await ctx.send(f"No audio files found in {MUSIC_DIRECTORY}!")
         random.shuffle(audio_files)
-        guild_state.dj_queue.extend(audio_files)
-        await ctx.send(f"Queued {len(audio_files)} songs from the playlist")
+        to_add = audio_files[:available_slots]
+        guild_state.dj_queue.extend(to_add)
+        await ctx.send(f"Queued {len(to_add)} songs from the playlist")
+        if len(audio_files) > available_slots:
+            await ctx.send(f"Omitted {len(audio_files) - available_slots} songs due to queue limits.")
 
-    if vc.is_playing() or vc.is_paused():
-        guild_state.is_switching_sources = True 
-        vc.stop()
-        await asyncio.sleep(0.1)
-        guild_state.is_switching_sources = False
-        
-    if guild_state.dj_queue:
+    # 4. Play if not currently playing
+    if not vc.is_playing() and not vc.is_paused():
         await play_next_dj_song(ctx, vc)
 
 async def generate_dj_list(search_path: str) -> List[str]:
@@ -281,11 +294,10 @@ async def generate_dj_list(search_path: str) -> List[str]:
             indent = ' ' * 4 * level
             folder_name = os.path.basename(root)
             lines.append(f"{folder_name}/" if level == 0 else f"{indent}{folder_name}/")
-            
+
             sub_indent = ' ' * 4 * (level + 1)
             for f in files:
-                _, ext = os.path.splitext(f)
-                if ext.lower() in ALLOWED_EXTENSIONS:
+                if f.lower().endswith(ALLOWED_EXTENSIONS):
                     lines.append(f"{sub_indent}- {f}")
         return lines
     return await asyncio.to_thread(_generate)
@@ -298,7 +310,7 @@ async def dj_list(ctx: commands.Context):
     await ctx.send(f"**Listing files in:** `{MUSIC_DIRECTORY}`")
     lines = await generate_dj_list(MUSIC_DIRECTORY)
 
-    if not lines or len(lines) == 1: 
+    if not lines or len(lines) == 1:
         return await ctx.send("Directory is empty or contains no valid audio files!")
 
     messages = []
@@ -312,7 +324,7 @@ async def dj_list(ctx: commands.Context):
     chunk += "```"
     messages.append(chunk)
 
-    for msg in messages: 
+    for msg in messages:
         await ctx.send(msg)
 
 @bot.command()
@@ -354,7 +366,7 @@ async def dj_resume(ctx):
 # ---------------------------------------------
 async def after_youtube_playback(ctx, vc, error):
     guild_state = get_guild_state(ctx.guild.id)
-    guild_state.yt_now_playing = None 
+    guild_state.yt_now_playing = None
     if error:
         logger.error(f"Error during YouTube playback: {error}")
         await ctx.send("An error occurred during playback.")
@@ -384,7 +396,7 @@ async def play_next_youtube(ctx, vc):
 
         loop = asyncio.get_event_loop()
         stream_url = await loop.run_in_executor(None, get_stream_url, video_webpage_url)
-        
+
         if not stream_url:
             raise ValueError("Could not extract stream URL")
 
@@ -403,7 +415,7 @@ async def play_next_youtube(ctx, vc):
 async def yt_play(ctx, *, url: str):
     if not ctx.author.voice:
         return await ctx.send("You need to be in a voice channel!")
-    
+
     guild_state = get_guild_state(ctx.guild.id)
     vc = await get_or_move_voice_client(ctx, ctx.author.voice.channel)
 
@@ -411,7 +423,10 @@ async def yt_play(ctx, *, url: str):
         guild_state.is_switching_sources = True
         guild_state.dj_queue.clear()
         guild_state.is_playing_dj = False
-        vc.stop() 
+        guild_state.is_paused_dj = False
+        vc.stop()
+        await asyncio.sleep(0.1) # Prevents overlapping callbacks
+        guild_state.is_switching_sources = False
         await ctx.send("Switching to YouTube")
 
     async def process_and_play():
@@ -419,9 +434,8 @@ async def yt_play(ctx, *, url: str):
         try:
             loop = asyncio.get_event_loop()
             video_list = await loop.run_in_executor(None, get_youtube_info, url)
-            
+
             if not video_list:
-                guild_state.is_switching_sources = False
                 return await msg.edit(content="Failed to get video information!")
 
             items_added = 0
@@ -429,23 +443,20 @@ async def yt_play(ctx, *, url: str):
                 if len(guild_state.yt_queue) >= MAX_QUEUE_SIZE:
                     await ctx.send(f"Queue capacity of {MAX_QUEUE_SIZE} reached. Some videos were omitted.")
                     break
-                
+
                 if v and v.get('url'):
                     guild_state.yt_queue.append({
                         'title': v.get('title', 'Unknown'),
-                        'url': v.get('url'), 
+                        'url': v.get('url'),
                         'duration': v.get('duration')
                     })
                     items_added += 1
 
             if items_added == 0:
-                guild_state.is_switching_sources = False # Added missing reset to prevent queue deadlock
                 return await msg.edit(content="No playable videos found!")
-            
+
             txt = f"Added **{video_list[0]['title']}**" if items_added == 1 else f"Added **{items_added}** videos"
             await msg.edit(content=txt)
-
-            guild_state.is_switching_sources = False
 
             if not vc.is_playing() and not vc.is_paused():
                 await play_next_youtube(ctx, vc)
@@ -453,7 +464,6 @@ async def yt_play(ctx, *, url: str):
         except Exception as e:
             logger.error(f"Error during extraction: {e}", exc_info=True)
             await msg.edit(content="An error occurred while processing the request.")
-            guild_state.is_switching_sources = False
 
     task = asyncio.create_task(process_and_play())
     background_tasks.add(task)
@@ -482,7 +492,7 @@ async def yt_queue(ctx):
     guild_state = get_guild_state(ctx.guild.id)
     if not guild_state.yt_queue:
         return await ctx.send("YouTube queue is empty!")
-    
+
     lines = [f"{i+1}. {v['title']}" for i, v in enumerate(guild_state.yt_queue[:10])]
     resp = "**YouTube Queue:**\n" + "\n".join(lines)
     if len(guild_state.yt_queue) > 10: resp += f"\n...and {len(guild_state.yt_queue)-10} more"
