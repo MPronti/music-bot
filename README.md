@@ -45,4 +45,5 @@ Be sure to update your local audio path in `main.py`
 #### Notes
 !dj_play: If no song name is specified, the entirety of the audio source directory will be shuffle played. If a subdirectory is specified, that directory will be shuffle played.
 
-!yt_play: If a name is specified, the video which appears first in a YouTube search of that name will be played
+!yt_play: If a name is specified, the video which appears first in a YouTube search of that name will be played.
+          Age-restricted videos will not play.
